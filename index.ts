@@ -1,245 +1,186 @@
-import LRU from "https://esm.sh/quick-lru@6.0.2";
-import { serve } from "https://deno.land/std@0.121.0/http/server.ts";
-import {
-  Cheerio,
-  cheerio,
-  Root,
-  TagElement,
-  TextElement,
-} from "https://deno.land/x/cheerio@1.0.7/mod.ts";
+import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
+import LRU from "https://esm.sh/quick-lru@6.1.1";
+import * as cheerio from "https://esm.sh/cheerio@1.0.0-rc.12";
 
-type Element = TagElement | TextElement;
+interface PinnedRepo {
+  owner: string;
+  repo: string;
+  link: string;
+  description?: string;
+  image: string;
+  website?: string;
+  language?: string;
+  languageColor?: string;
+  stars: number;
+  forks: number;
+}
 
-const aimer = async (url: string) => {
-  const html = await fetch(url).then((res) => res.text());
-  return cheerio.load(html);
-};
-
-const cache = new LRU({
+const cache = new LRU<string, PinnedRepo[]>({
   maxSize: 500,
 });
 
-async function ghPinnedRepos(username: string) {
-  const $ = await aimer(`https://github.com/${username}`);
-  const pinned = $(".pinned-item-list-item.public").toArray();
-
-  // if empty
-  if (!pinned || pinned.length === 0) return [];
-
-  const result: any[] = [];
-  for (const [index, item] of pinned.entries()) {
-    const owner = getOwner($, item);
-    const repo = getRepo($, item);
-    const link = "https://github.com/" + (owner || username) + "/" + repo;
-    const description = getDescription($, item);
-    const image = `https://opengraph.githubassets.com/1/${
-      owner || username
-    }/${repo}`;
-    const website = await getWebsite(link);
-    const language = getLanguage($, item);
-    const languageColor = getLanguageColor($, item);
-    const stars = getStars($, item);
-    const forks = getForks($, item);
-
-    result[index] = {
-      owner: owner || username,
-      repo,
-      link,
-      description: description || undefined,
-      image: image,
-      website: website || undefined,
-      language: language || undefined,
-      languageColor: languageColor || undefined,
-      stars: stars || 0,
-      forks: forks || 0,
-    };
-  }
-  // });
-  return result;
-}
-
-function getOwner($: Cheerio & Root, item: Element) {
+async function fetchWithTimeout(url: string, timeout = 5000): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  
   try {
-    return $(item).find(".owner").text();
-  } catch (error) {
-    return undefined;
-  }
-}
-
-function getRepo($: Cheerio & Root, item: Element) {
-  try {
-    return $(item).find(".repo").text();
-  } catch (error) {
-    return undefined;
-  }
-}
-
-function getDescription($: Cheerio & Root, item: Element) {
-  try {
-    return $(item).find(".pinned-item-desc").text().trim();
-  } catch (error) {
-    return undefined;
-  }
-}
-
-function getWebsite(repo: string) {
-  return aimer(repo)
-    .then(($) => {
-      try {
-        const site = $(".BorderGrid-cell");
-        if (!site || site.length === 0) return [];
-
-        let href;
-        site.each((index, item) => {
-          if (index == 0) {
-            href = getHREF($, item);
-          }
-        });
-        return href;
-      } catch (error) {
-        console.error(error);
-        return undefined;
+    const response = await fetch(url, { 
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
       }
-    })
-    .catch((error) => {
-      console.error(error);
-      return undefined;
     });
-}
-
-function getHREF($: Cheerio & Root, item: Element) {
-  try {
-    return $(item).find('a[href^="https"]').attr("href")?.trim();
-  } catch (error) {
-    return undefined;
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    return response;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
-function getImage(repo: string) {
-  return aimer(repo)
-    .then(($) => {
-      try {
-        const site = $("meta");
-        if (!site || site.length === 0) return [];
+async function loadHTML(url: string): Promise<cheerio.CheerioAPI> {
+  try {
+    const response = await fetchWithTimeout(url);
+    const html = await response.text();
+    return cheerio.load(html);
+  } catch (error) {
+    console.error(`Failed to load URL: ${url}`, error);
+    throw new Error(`Failed to load URL: ${url}`);
+  }
+}
 
-        let href;
-        site.each((index, item) => {
-          const attr = $(item).attr("property");
-          if (attr == "og:image") {
-            href = getSRC($, item);
-          }
-        });
-        return href;
-      } catch (error) {
-        console.error(error);
-        return undefined;
-      }
+async function getPinnedRepos(username: string): Promise<PinnedRepo[]> {
+  const $ = await loadHTML(`https://github.com/${username}`);
+  const pinnedItems = $('.js-pinned-items-reorder-list > li').toArray();
+
+  if (!pinnedItems.length) {
+    return [];
+  }
+
+  const repos: PinnedRepo[] = await Promise.all(
+    pinnedItems.map(async (item) => {
+      const $item = $(item);
+      
+      // Get repo name from the title element
+      const repo = $item.find('[class*="repo"]').text().trim();
+      
+      // Updated selector for description using the exact class
+      const description = $item.find('.pinned-item-desc').text().trim();
+      
+      // Get language
+      const language = $item.find('[class*="language-color"]').next().text().trim();
+      const languageColor = $item.find('[class*="language-color"]').css('background-color');
+
+      // Get stars and forks
+      const stars = parseNumericValue($item.find('a[href*="/stargazers"]').text().trim());
+      const forks = parseNumericValue($item.find('a[href*="/forks"]').text().trim());
+
+      return {
+        owner: username,
+        repo,
+        link: `https://github.com/${username}/${repo}`,
+        description: description || undefined,
+        image: `https://opengraph.githubassets.com/1/${username}/${repo}`,
+        website: await getRepoWebsite(`https://github.com/${username}/${repo}`),
+        language: language || undefined,
+        languageColor: languageColor || undefined,
+        stars,
+        forks,
+      };
     })
-    .catch((error) => {
-      console.error(error);
-      return undefined;
-    });
+  );
+
+  return repos;
 }
 
-function getSRC($: Cheerio & Root, item: Element) {
+async function getRepoWebsite(repoUrl: string): Promise<string | undefined> {
   try {
-    return $(item).attr("content")?.trim();
+    const $ = await loadHTML(repoUrl);
+    const website = $('[class*="BorderGrid-cell"] a[href^="https"]').first().attr("href");
+    return website?.trim();
   } catch (error) {
+    console.error(`Failed to get website for repo: ${repoUrl}`, error);
     return undefined;
   }
 }
 
-function getStars($: Cheerio & Root, item: Element) {
-  try {
-    return $(item).find('a[href$="/stargazers"]').text().trim();
-  } catch (error) {
-    return 0;
+function parseNumericValue(value: string): number {
+  if (!value) return 0;
+  const normalized = value.toLowerCase().trim();
+  
+  if (normalized.endsWith('k')) {
+    return Math.round(parseFloat(normalized.slice(0, -1)) * 1000);
   }
-}
-
-function getForks($: Cheerio & Root, item: Element) {
-  try {
-    return $(item).find('a[href$="/network/members"]').text().trim();
-  } catch (error) {
-    return 0;
-  }
-}
-
-function getLanguage($: Cheerio & Root, item: Element) {
-  try {
-    return $(item).find('[itemprop="programmingLanguage"]').text();
-  } catch (error) {
-    return undefined;
-  }
-}
-
-function getLanguageColor($: Cheerio & Root, item: Element) {
-  try {
-    return $(item).find(".repo-language-color").css("background-color");
-  } catch (error) {
-    return undefined;
-  }
+  return parseInt(normalized, 10) || 0;
 }
 
 async function handler(request: Request): Promise<Response> {
-  /* allow cors from any origin */
-  const headers: Record<string, string> = {
+  const headers = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Request-Method": "*",
     "Access-Control-Allow-Methods": "OPTIONS, GET",
     "Access-Control-Allow-Headers": "*",
+    "Cache-Control": "public, max-age=600",
   };
 
   if (request.method === "OPTIONS") {
-    return new Response();
+    return new Response(null, { headers });
   }
 
   const url = new URL(request.url);
-  const { username, refresh } = Object.fromEntries(url.searchParams);
+  const username = url.searchParams.get("username");
+  const refresh = url.searchParams.get("refresh") === "true";
 
   if (!username) {
-    headers["content-type"] = "text/html";
-
     return new Response(
-      `
-    <head>
-      <meta charset="utf-8" />
-      <title>GitHub pinned repos API</title>
-    </head>
-    <style>body {font-family: Helvetica, serif;margin: 30px;}</style>
-    <p>GET /?username=GITHUB_USERNAME</p>
-
-    <p>
-      <form action="/">
-        <input type="text" name="username" placeholder="username" />
-        <button type="submit">Go!</button>
-      </form>
-    </p>
-
-    <p>made by <a href="https://github.com/egoist">@egoist</a> · <a href="https://github.com/egoist/gh-pinned-repos">source code</a></p>
-    <p>rehosted by <a href="https://github.com/chiraitori">@chiraitori</a> </p>
-  `,
-      { headers }
+      `<!DOCTYPE html>
+      <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <title>GitHub Pinned Repos API</title>
+          <style>
+            body { font-family: system-ui; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+            input, button { padding: 0.5rem; font-size: 1rem; }
+          </style>
+        </head>
+        <body>
+          <h1>GitHub Pinned Repos API</h1>
+          <form action="/">
+            <input type="text" name="username" placeholder="GitHub username" required>
+            <button type="submit">Get Repos</button>
+          </form>
+          <p>GET /?username=GITHUB_USERNAME&refresh=true|false</p>
+        </body>
+      </html>`,
+      { headers: { ...headers, "Content-Type": "text/html; charset=utf-8" } }
     );
   }
 
-  let result;
-  const cachedResult = cache.get(username);
-  if (cachedResult && !refresh) {
-    result = cachedResult;
-    // stale-while-revalidate
-    ghPinnedRepos(username)
-      .then((data) => {
-        cache.set(username, data);
-      })
-      .catch((error) => {});
-  } else {
-    result = await ghPinnedRepos(username);
-    cache.set(username, result);
+  try {
+    let result: PinnedRepo[];
+    
+    if (!refresh && cache.has(username)) {
+      result = cache.get(username)!;
+      getPinnedRepos(username)
+        .then(data => cache.set(username, data))
+        .catch(console.error);
+    } else {
+      result = await getPinnedRepos(username);
+      cache.set(username, result);
+    }
+
+    return new Response(JSON.stringify(result, null, 2), {
+      headers: { ...headers, "Content-Type": "application/json" }
+    });
+  } catch (error) {
+    console.error(`Error processing request for username: ${username}`, error);
+    return new Response(
+      JSON.stringify({ error: "Failed to fetch pinned repositories", details: error.message }),
+      { status: 500, headers: { ...headers, "Content-Type": "application/json" } }
+    );
   }
-  headers["content-type"] = "application/json";
-  return new Response(JSON.stringify(result), { headers });
 }
 
-serve(handler);
-console.log(`> Open http://localhost:8000`);
+serve(handler, { port: 8000 });
+console.log(`Server running at http://localhost:8000`);
