@@ -182,7 +182,7 @@ async function handler(request: Request): Promise<Response> {
   }
 }
 
-const port = parseInt(Deno.env.get("PORT") || "8000");
+const port = parseInt(Deno.env.get("PORT") || "80");
 const hostname = "0.0.0.0"; // Required for Deno Deploy
 
 serve(handler, { port, hostname });
