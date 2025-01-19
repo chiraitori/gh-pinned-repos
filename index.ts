@@ -6,7 +6,7 @@ import {
   Root,
   TagElement,
   TextElement,
-} from "https://deno.land/x/cheerio@1.0.4/mod.ts";
+} from "https://deno.land/x/cheerio@1.0.7/mod.ts";
 
 type Element = TagElement | TextElement;
 
