@@ -182,5 +182,8 @@ async function handler(request: Request): Promise<Response> {
   }
 }
 
-serve(handler, { port: 8000 });
-console.log(`Server running at http://localhost:8000`);
+const port = parseInt(Deno.env.get("PORT") || "8000");
+const hostname = "0.0.0.0"; // Required for Deno Deploy
+
+serve(handler, { port, hostname });
+console.log(`Server running on http://${hostname}:${port}`);
