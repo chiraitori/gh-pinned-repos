@@ -33,4 +33,4 @@ jobs:
           entrypoint: "main.ts"
           root: "."
           
-          exclude: deno run --allow-net main.ts
+          
