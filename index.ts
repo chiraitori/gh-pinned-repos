@@ -217,6 +217,7 @@ async function handler(request: Request): Promise<Response> {
     </p>
 
     <p>made by <a href="https://github.com/egoist">@egoist</a> · <a href="https://github.com/egoist/gh-pinned-repos">source code</a></p>
+    <p>rehosted by <a href="https://github.com/chiraitori">@chiraitori</a> </p>
   `,
       { headers }
     );
